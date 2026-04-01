@@ -19,7 +19,6 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 import db
@@ -30,47 +29,21 @@ import crypto_utils
 # RSA Key Pair — loaded once at startup
 # ---------------------------------------------------------------------------
 # In production: load from a secrets manager / HSM.
-# Here we persist keys to disk to keep vault decryptable across reloads.
+# Here we generate fresh keys each run (fine for a prototype).
 
 PRIVATE_KEY_PEM: bytes = b""
 PUBLIC_KEY_PEM: bytes = b""
-KEY_DIR = "keys"
-PRIVATE_KEY_PATH = os.path.join(KEY_DIR, "private.pem")
-PUBLIC_KEY_PATH = os.path.join(KEY_DIR, "public.pem")
-
-
-def _load_or_create_rsa_keys() -> tuple[bytes, bytes]:
-    """Load PEM keys from disk or generate and persist them."""
-    if not os.path.exists(KEY_DIR):
-        os.makedirs(KEY_DIR, exist_ok=True)
-
-    if os.path.exists(PRIVATE_KEY_PATH) and os.path.exists(PUBLIC_KEY_PATH):
-        with open(PRIVATE_KEY_PATH, "rb") as f:
-            private_key = f.read()
-        with open(PUBLIC_KEY_PATH, "rb") as f:
-            public_key = f.read()
-        print("Loaded existing RSA key pair from disk.")
-        return private_key, public_key
-
-    private_key, public_key = crypto_utils.generate_rsa_key_pair()
-    with open(PRIVATE_KEY_PATH, "wb") as f:
-        f.write(private_key)
-    with open(PUBLIC_KEY_PATH, "wb") as f:
-        f.write(public_key)
-
-    print("Generated and persisted new RSA key pair.")
-    return private_key, public_key
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: initialize DB and load/generate RSA key pair."""
+    """Startup: initialize DB and generate RSA key pair."""
     global PRIVATE_KEY_PEM, PUBLIC_KEY_PEM
 
     db.init_db()
 
-    PRIVATE_KEY_PEM, PUBLIC_KEY_PEM = _load_or_create_rsa_keys()
-    print("\nVault ready. RSA key pair loaded and vault initialized.\n")
+    PRIVATE_KEY_PEM, PUBLIC_KEY_PEM = crypto_utils.generate_rsa_key_pair()
+    print("\n✅ Vault ready. RSA key pair generated for this session.\n")
 
     yield   # application runs here
 
@@ -273,150 +246,19 @@ def list_passwords():
     }
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/")
 def root():
-    return """
-    <!DOCTYPE html>
-    <html lang='en'>
-    <head>
-      <meta charset='UTF-8'>
-      <meta name='viewport' content='width=device-width, initial-scale=1.0'>
-      <title>Crypto Vault UI</title>
-      <style>
-        :root {
-          --bg: #0f172a;
-          --card: #111827;
-          --panel: #1f2937;
-          --accent: #22d3ee;
-          --accent2: #a855f7;
-          --text: #e2e8f0;
-          --muted: #94a3b8;
-          --error: #fb7185;
-          --success: #34d399;
-        }
-
-        body { font-family: 'Inter', 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 0; background: linear-gradient(120deg, #040b1d, #0e1b40 60%, #131f4f); color: var(--text); }
-        .container { max-width: 960px; margin: 1.5rem auto; padding: 1.25rem; background: var(--card); border-radius: 16px; box-shadow: 0 16px 40px rgba(0,0,0,.4); border: 1px solid rgba(56, 189, 248, .2); }
-        h1 { margin-top:0; color: var(--accent); letter-spacing: 0.04em; }
-        h2 { color: var(--text); margin: 0.75rem 0 0.45rem; }
-        p { margin: 0.4rem 0 1rem; color: var(--muted); }
-
-        .card { background: var(--panel); border-radius: 12px; border: 1px solid rgba(148, 163, 184, .2); padding: 1rem; box-shadow: inset 0 0 0 1px rgba(71, 85, 105, .10); margin-bottom: 1.0rem; }
-        label { display: block; margin: .45rem 0 .15rem; font-size: 0.90rem; color: #cbd5e1; }
-        input { width: 100%; margin: 0.25rem 0 .8rem; padding: .68rem; border: 1px solid #334155; border-radius: 8px; background: #0f172a; color: #e2e8f0; }
-        input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(34, 211, 238, .20); }
-        button { width: 100%; margin: .3rem 0 .8rem; padding: .75rem; border: 0; border-radius: 10px; background: linear-gradient(120deg, var(--accent), var(--accent2)); color: #0f172a; font-weight: 700; cursor: pointer; transition: transform .15s ease, filter .15s ease; }
-        button:hover { transform: translateY(-1px); filter: brightness(1.05); }
-
-        .two-cols { display:grid; grid-template-columns: 1fr; gap:1rem; }
-        @media (min-width: 760px) { .two-cols { grid-template-columns: 1fr 1fr; } }
-
-        .log { border: 1px solid rgba(100, 116, 139, .4); border-radius: 10px; padding: .9rem; background: rgba(15, 23, 42, .95); min-height: 210px; font-family: 'Courier New', monospace; color: #e2e8f0; white-space: pre-wrap; overflow-y: auto; }
-        .tag { display: inline-block; margin: .2rem .2rem .2rem 0; padding: .2rem .5rem; color: #fff; border-radius: 999px; font-size: .81rem; }
-        .tag-success { background: var(--success); }
-        .tag-info { background: var(--accent); }
-        .tag-error { background: var(--error); }
-      </style>
-    </head>
-    <body>
-      <div class='container'>
-        <h1>Cryptographically Agile Vault</h1>
-
-        <section>
-          <h2>Add password (v1 encrypted)</h2>
-          <label for='site'>Site</label><input id='site' placeholder='github.com'/>
-          <label for='username'>Username</label><input id='username' placeholder='alice@example.com'/>
-          <label for='password'>Password</label><input id='password' type='password' placeholder='hunter2' />
-          <button onclick='addPassword()'>Add Password</button>
-        </section>
-
-        <section>
-          <h2>Get password by ID (lazy migrate)</h2>
-          <label for='readId'>Credential ID</label><input id='readId' placeholder='1' />
-          <button onclick='getPassword()'>Get Password</button>
-        </section>
-
-        <section>
-          <h2>List credentials</h2>
-          <button onclick='listPasswords()'>Load List</button>
-        </section>
-
-        <section>
-          <h2>Output</h2>
-          <div id='log' class='log'>Ready. Use forms above.</div>
-        </section>
-      </div>
-
-      <script>
-        const log = document.getElementById('log');
-        function logMessage(msg, level='info') {
-          const time = new Date().toLocaleTimeString();
-          let prefix = `[${time}]`;
-          /*if (level === 'success') prefix += '1';
-          if (level === 'error') prefix += '0';"*/
-          log.textContent += `${prefix} ${msg}\n`;
-          log.scrollTop = log.scrollHeight;
-        }
-
-        function validate(inputs) {
-          return inputs.every(v => v && v.trim().length > 0);
-        }
-
-        async function addPassword() {
-          const site = document.getElementById('site').value;
-          const username = document.getElementById('username').value;
-          const password = document.getElementById('password').value;
-
-          if (!validate([site, username, password])) {
-            logMessage('Add Password: all fields are required', 'error');
-            return;
-          }
-
-          const payload = { site, username, password };
-          try {
-            const res = await fetch('/add-password', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-            const data = await res.json();
-            if (res.ok) {
-              logMessage(`ADDED ID=${data.id} site=${data.site} scheme=${data.scheme_version}`, 'success');
-            } else {
-              logMessage(`ADD  ${JSON.stringify(data)}`, 'error');
-            }
-          } catch (err) { logMessage('ADD ERROR: ' + err, 'error'); }
-        }
-
-        async function getPassword() {
-          const id = document.getElementById('readId').value;
-          if (!validate([id])) {
-            logMessage('Get Password: ID is required', 'error');
-            return;
-          }
-          try {
-            const res = await fetch('/get-password/' + encodeURIComponent(id));
-            const data = await res.json();
-            if (res.ok) {
-              logMessage(`ID=${data.id}`);
-              logMessage(`migrated=${data.migrated}`);
-              logMessage(`scheme=${data.scheme_version}`);
-              logMessage(`password=${data.password}`);
-            } else {
-              logMessage(`Get Password failed: ${data.detail || JSON.stringify(data)}`, 'error');
-            }
-          } catch (err) { logMessage('Get Password failed: ' + err, 'error'); }
-        }
-
-        async function listPasswords() {
-          try {
-            const res = await fetch('/list-passwords');
-            const data = await res.json();
-            if (res.ok) {
-              logMessage(`LIST  total=${data.total} v1=${data.v1_count} v2=${data.v2_count}`,'success');
-              logMessage(JSON.stringify(data.entries, null, 2));
-            } else {
-              logMessage(`LIST  ${JSON.stringify(data)}`, 'error');
-            }
-          } catch (err) { logMessage('LIST ERROR: ' + err, 'error'); }
-        }
-      </script>
-    </body>
-    </html>
-    """
+    return {
+        "name": "Cryptographically Agile Password Vault",
+        "version": "1.0.0",
+        "endpoints": {
+            "POST /add-password":            "Store a new password (encrypted as v1)",
+            "GET  /get-password/{id}":       "Retrieve password + trigger lazy migration",
+            "GET  /list-passwords":          "See all entries and their scheme versions",
+        },
+        "demo_flow": [
+            "1. POST /add-password  →  stored as v1",
+            "2. GET  /get-password/1  →  migrated to v2, migrated=true",
+            "3. GET  /get-password/1  →  already v2, migrated=false",
+        ],
+    }
